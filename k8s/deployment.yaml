@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudscale-backend
+  namespace: default
+  labels:
+    app: cloudscale-backend
+    tier: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudscale-backend
+  template:
+    metadata:
+      labels:
+        app: cloudscale-backend
+        tier: api
+    spec:
+      containers:
+      - name: backend
+        image: cloudscale-backend:1.0.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5000
+          name: http
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 5
+          periodSeconds: 5
