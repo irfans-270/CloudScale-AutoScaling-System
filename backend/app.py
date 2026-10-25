@@ -1,6 +1,10 @@
+import os
+import sys
+import socket
 import time
 import math
 import hashlib
+import requests
 from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 
@@ -9,16 +13,80 @@ from instance_manager import InstanceManager
 from scaling_controller import ScalingController
 from load_generator import LoadGenerator
 
+# Environment Configuration
+CLOUDSCALE_MODE = os.environ.get("CLOUDSCALE_MODE", "simulation").strip().lower()
+HOST = os.environ.get("HOST", "0.0.0.0")
+PORT = int(os.environ.get("PORT", "5000"))
+IS_WORKER = (CLOUDSCALE_MODE == "worker")
+
 app = Flask(__name__)
 CORS(app)
 
 # Core subsystems
-metrics_collector = MetricsCollector(history_maxlen=60)
-instance_manager = InstanceManager(is_simulated=True)
-scaling_controller = ScalingController(instance_manager, metrics_collector)
+metrics_collector = MetricsCollector(history_maxlen=60, is_worker=IS_WORKER)
+instance_manager = InstanceManager(is_simulated=(not IS_WORKER))
+scaling_controller = ScalingController(instance_manager, metrics_collector, mode=CLOUDSCALE_MODE)
 load_generator = LoadGenerator(metrics_collector, instance_manager)
 
 START_TIME = time.time()
+
+# Cached EC2 instance identity for worker mode
+_cached_identity = None
+
+def get_instance_identity():
+    """Read instance identity (instance_id, availability_zone) via IMDSv2 with caching and hostname fallback."""
+    global _cached_identity
+    if _cached_identity is not None:
+        return _cached_identity
+
+    instance_id = None
+    availability_zone = None
+
+    try:
+        token_resp = requests.put(
+            "http://169.254.169.254/latest/api/token",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"},
+            timeout=1.0
+        )
+        if token_resp.status_code == 200:
+            token = token_resp.text.strip()
+            headers = {"X-aws-ec2-metadata-token": token}
+
+            id_resp = requests.get(
+                "http://169.254.169.254/latest/meta-data/instance-id",
+                headers=headers,
+                timeout=1.0
+            )
+            az_resp = requests.get(
+                "http://169.254.169.254/latest/meta-data/placement/availability-zone",
+                headers=headers,
+                timeout=1.0
+            )
+            if id_resp.status_code == 200:
+                instance_id = id_resp.text.strip()
+            if az_resp.status_code == 200:
+                availability_zone = az_resp.text.strip()
+    except Exception:
+        pass
+
+    if not instance_id:
+        instance_id = socket.gethostname()
+    if not availability_zone:
+        availability_zone = "local"
+
+    _cached_identity = {
+        "instance_id": instance_id,
+        "availability_zone": availability_zone
+    }
+    return _cached_identity
+
+# Pre-cache identity in worker mode so health checks remain instantaneous
+if IS_WORKER:
+    get_instance_identity()
+
+# NOTE: Under multiple Gunicorn worker processes, in-memory per-worker request
+# counters and sliding-window metrics are partial (each worker only observes
+# its own subset of requests). On AWS, ALB and CloudWatch metrics are authoritative.
 
 # Request timing hook
 @app.before_request
@@ -41,7 +109,7 @@ def index():
         "project": "CloudScale — Intelligent Cloud Resource Auto-Scaling and Monitoring System",
         "status": "Operational",
         "version": "1.0.0",
-        "mode": "Local Simulation Mode (Kubernetes compatible)",
+        "mode": "AWS EC2 Worker Mode" if IS_WORKER else "Local Simulation Mode (Kubernetes compatible)",
         "uptime_seconds": int(time.time() - START_TIME),
         "endpoints": [
             "/health",
@@ -58,15 +126,24 @@ def index():
         ]
     })
 
-# 2. Health check (K8s liveness & readiness compatible)
+# 2. Health check (ALB health check & K8s liveness/readiness compatible)
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({
-        "status": "healthy",
-        "timestamp": int(time.time()),
-        "uptime_seconds": int(time.time() - START_TIME),
-        "replicas_active": scaling_controller.current_replicas
-    }), 200
+    try:
+        resp = {
+            "status": "healthy",
+            "timestamp": int(time.time()),
+            "uptime_seconds": int(time.time() - START_TIME)
+        }
+        if IS_WORKER:
+            identity = get_instance_identity()
+            resp["instance_id"] = identity["instance_id"]
+            resp["availability_zone"] = identity["availability_zone"]
+        else:
+            resp["replicas_active"] = scaling_controller.current_replicas
+        return jsonify(resp), 200
+    except Exception as e:
+        return jsonify({"status": "healthy", "error": str(e)}), 200
 
 # 3. Current metrics
 @app.route("/api/metrics", methods=["GET"])
@@ -180,13 +257,20 @@ def compute():
     
     elapsed_ms = (time.perf_counter() - start) * 1000.0
 
-    return jsonify({
+    resp_data = {
         "status": "computed",
         "iterations": iterations,
         "checksum": digest[:12],
-        "compute_time_ms": round(elapsed_ms, 2),
-        "active_replicas": scaling_controller.current_replicas
-    })
+        "compute_time_ms": round(elapsed_ms, 2)
+    }
+    if IS_WORKER:
+        identity = get_instance_identity()
+        resp_data["instance_id"] = identity["instance_id"]
+        resp_data["availability_zone"] = identity["availability_zone"]
+    else:
+        resp_data["active_replicas"] = scaling_controller.current_replicas
+
+    return jsonify(resp_data)
 
 # 11. Prometheus metrics format
 @app.route("/metrics", methods=["GET"])
@@ -218,5 +302,5 @@ def prometheus_metrics():
     return Response("\n".join(lines) + "\n", mimetype="text/plain; version=0.0.4")
 
 if __name__ == "__main__":
-    print("[CloudScale Backend] Starting server on http://127.0.0.1:5000 ...")
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    print(f"[CloudScale Backend] Starting server on http://{HOST}:{PORT} ...")
+    app.run(host=HOST, port=PORT, debug=False, threaded=True)

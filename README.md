@@ -70,21 +70,30 @@ A functional, demo-ready prototype demonstrating cloud elasticity, load balancin
 
 ### Terminal 1: Start Backend API (Port 5000)
 ```powershell
-# Navigate to project directory
-Set-Location "d:\Cloud proj"
+# Navigate to project root directory
+Set-Location "c:\Users\irfan\CloudScale-AutoScaling-System"
+
+# Create a virtual environment (first time setup)
+python -m venv venv
 
 # Activate the virtual environment
 .\venv\Scripts\Activate.ps1
 
+# Install backend dependencies (first time setup)
+pip install -r backend\requirements.txt
+
 # Run Flask backend server
-python backend/app.py
+python backend\app.py
 ```
 *Backend starts on `http://127.0.0.1:5000`.*
 
 ### Terminal 2: Start Frontend Dashboard (Port 3000)
 ```powershell
-# Open a new terminal in project directory
-Set-Location "d:\Cloud proj\frontend"
+# Navigate to frontend directory
+Set-Location "c:\Users\irfan\CloudScale-AutoScaling-System\frontend"
+
+# Install frontend dependencies (first time setup)
+npm install
 
 # Launch Vite development server
 npm run dev -- --host 127.0.0.1
@@ -100,7 +109,7 @@ To demonstrate the full lifecycle to college faculty, follow these steps:
 ### Option A: Automated Demo via PowerShell Script
 Run the automated demonstration script:
 ```powershell
-powershell -ExecutionPolicy Bypass -File "d:\Cloud proj\scripts\demo_script.ps1"
+powershell -ExecutionPolicy Bypass -File ".\scripts\demo_script.ps1"
 ```
 
 ### Option B: Interactive Visual Demo (Recommended for Presentation)
@@ -143,7 +152,7 @@ You can also generate synthetic traffic from the command line:
 
 ```powershell
 # Run 15 concurrent clients for 30 seconds
-& "d:\Cloud proj\venv\Scripts\python.exe" "d:\Cloud proj\scripts\load_test.py" -c 15 -d 30 -i 25000
+python scripts\load_test.py -c 15 -d 30 -i 25000
 ```
 
 CLI Parameters:

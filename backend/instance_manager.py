@@ -39,8 +39,9 @@ class InstanceManager:
         self.is_simulated = is_simulated
         self.instances = []
         self._next_index = 1
-        # Initialize with 1 base replica
-        self.set_replica_count(1)
+        # Initialize with 1 base replica only in simulation mode
+        if self.is_simulated:
+            self.set_replica_count(1)
 
     def set_replica_count(self, count: int):
         count = max(1, count)

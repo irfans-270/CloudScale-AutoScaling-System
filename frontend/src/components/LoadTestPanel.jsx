@@ -30,18 +30,6 @@ export default function LoadTestPanel({ loadStatus, onStartLoad, onStopLoad, cur
     }
   };
 
-  const handleQuickDemo = async () => {
-    setConcurrency(25);
-    setDuration(45);
-    setIntensity('high');
-    setLoadingAction(true);
-    try {
-      await onStartLoad({ concurrency: 25, duration: 45, intensity: 'high' });
-    } finally {
-      setLoadingAction(false);
-    }
-  };
-
   return (
     <div className="bg-slate-900/80 backdrop-blur-md rounded-xl p-6 border border-slate-800 shadow-xl my-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
@@ -56,15 +44,6 @@ export default function LoadTestPanel({ loadStatus, onStartLoad, onStopLoad, cur
         </div>
 
         <div className="flex items-center gap-3">
-          <button
-            id="quick-demo-scenario-btn"
-            onClick={handleQuickDemo}
-            disabled={isActive || loadingAction}
-            className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-gradient-to-r from-amber-500/20 to-rose-500/20 border border-amber-500/40 text-amber-300 hover:border-amber-400 hover:text-white transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
-          >
-            ⚡ Faculty Demo Scenario
-          </button>
-
           {!isActive ? (
             <button
               id="start-load-test-btn"

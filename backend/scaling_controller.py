@@ -4,7 +4,7 @@ import uuid
 from typing import List, Dict, Any
 
 class ScalingController:
-    def __init__(self, instance_manager, metrics_collector):
+    def __init__(self, instance_manager, metrics_collector, mode: str = "simulation"):
         self.instance_manager = instance_manager
         self.metrics_collector = metrics_collector
         self.lock = threading.Lock()
@@ -17,20 +17,24 @@ class ScalingController:
         self.cooldown_seconds = 15       # Fast enough for live college demo
         
         # Operational State
+        self.mode = mode
+        self.is_simulated = (mode == "simulation")
         self.current_replicas = self.min_replicas
-        self.instance_manager.set_replica_count(self.current_replicas)
+        if self.is_simulated:
+            self.instance_manager.set_replica_count(self.current_replicas)
         self.scaling_status = "Stable"
         self.last_scaling_time = 0.0
-        self.mode = "simulation" # "simulation" or "kubernetes"
-        self.is_simulated = True
         
         # Event History (newest first)
         self.scaling_events: List[Dict[str, Any]] = []
         
-        # Background control loop
+        # Background control loop (only in simulation mode)
         self._running = True
-        self._worker_thread = threading.Thread(target=self._control_loop, daemon=True)
-        self._worker_thread.start()
+        if self.is_simulated:
+            self._worker_thread = threading.Thread(target=self._control_loop, daemon=True)
+            self._worker_thread.start()
+        else:
+            self._worker_thread = None
 
     def update_config(self, min_replicas=None, max_replicas=None, 
                       scale_out_threshold=None, scale_in_threshold=None, 
@@ -50,10 +54,12 @@ class ScalingController:
             # Clamp current replicas within new limits
             if self.current_replicas < self.min_replicas:
                 self.current_replicas = self.min_replicas
-                self.instance_manager.set_replica_count(self.current_replicas)
+                if self.is_simulated:
+                    self.instance_manager.set_replica_count(self.current_replicas)
             elif self.current_replicas > self.max_replicas:
                 self.current_replicas = self.max_replicas
-                self.instance_manager.set_replica_count(self.current_replicas)
+                if self.is_simulated:
+                    self.instance_manager.set_replica_count(self.current_replicas)
 
         return self.get_config()
 

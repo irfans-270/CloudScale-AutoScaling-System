@@ -4,9 +4,10 @@ from collections import deque
 import psutil
 
 class MetricsCollector:
-    def __init__(self, history_maxlen=60):
+    def __init__(self, history_maxlen=60, is_worker: bool = False):
         self.lock = threading.Lock()
         self.history_maxlen = history_maxlen
+        self.is_worker = is_worker
         
         # Cumulative counters
         self.total_requests = 0
@@ -23,6 +24,7 @@ class MetricsCollector:
         
         # Time-series history for charts (1 sample per second)
         self.history = deque(maxlen=history_maxlen)
+        self.last_real_cpu = None
         
         # Start background monitor thread for smoothing and recording history
         self._running = True
@@ -68,29 +70,41 @@ class MetricsCollector:
                 avg_latency = 4.2
                 p95_latency = 8.5
             
-            # Baseline system CPU utilization
-            try:
-                base_cpu = psutil.cpu_percent(interval=None)
-            except Exception:
-                base_cpu = 12.0
-            
-            # Bounded base cpu range (10% - 25% idle)
-            base_cpu = max(8.0, min(25.0, base_cpu))
-            
-            # Effective CPU per replica:
-            # Synthetic load distributed across active replicas (Load balancing principle)
-            replicas = max(1, current_replicas)
-            workload_per_replica = self.synthetic_load / (replicas ** 0.85) # Diminishing returns scaling model
-            
-            total_cpu = min(100.0, round(base_cpu + workload_per_replica, 1))
-            
-            # Latency dynamically scales with CPU and inversely with replicas
-            # Demonstrates that scaling out reduces latency congestion!
-            if self.synthetic_load > 10:
-                congestion_factor = (total_cpu / 100.0) ** 2
-                scaled_latency = round(avg_latency + (congestion_factor * 85.0 / replicas), 1)
-            else:
+            if self.is_worker:
+                # In worker mode, report this machine's REAL CPU via psutil.cpu_percent
+                if self.last_real_cpu is not None:
+                    real_cpu = self.last_real_cpu
+                else:
+                    try:
+                        real_cpu = psutil.cpu_percent(interval=None)
+                    except Exception:
+                        real_cpu = 0.0
+                total_cpu = round(float(real_cpu), 1)
                 scaled_latency = avg_latency
+            else:
+                # Baseline system CPU utilization
+                try:
+                    base_cpu = psutil.cpu_percent(interval=None)
+                except Exception:
+                    base_cpu = 12.0
+                
+                # Bounded base cpu range (10% - 25% idle)
+                base_cpu = max(8.0, min(25.0, base_cpu))
+                
+                # Effective CPU per replica:
+                # Synthetic load distributed across active replicas (Load balancing principle)
+                replicas = max(1, current_replicas)
+                workload_per_replica = self.synthetic_load / (replicas ** 0.85) # Diminishing returns scaling model
+                
+                total_cpu = min(100.0, round(base_cpu + workload_per_replica, 1))
+                
+                # Latency dynamically scales with CPU and inversely with replicas
+                # Demonstrates that scaling out reduces latency congestion!
+                if self.synthetic_load > 10:
+                    congestion_factor = (total_cpu / 100.0) ** 2
+                    scaled_latency = round(avg_latency + (congestion_factor * 85.0 / replicas), 1)
+                else:
+                    scaled_latency = avg_latency
 
             return {
                 "cpu_utilization": total_cpu,
@@ -114,6 +128,11 @@ class MetricsCollector:
         while self._running:
             time.sleep(1.0)
             
+            try:
+                self.last_real_cpu = psutil.cpu_percent(interval=None)
+            except Exception:
+                pass
+
             # Smooth synthetic load towards target
             with self.lock:
                 diff = self.target_synthetic_load - self.synthetic_load
@@ -122,7 +141,13 @@ class MetricsCollector:
                 else:
                     self.synthetic_load += diff * 0.35 # Responsive rise and decay
 
-            # Sample will be pushed by the controller or app with current replica context
+            # In worker mode, ScalingController loop is not running, so sampler pushes history points
+            if self.is_worker:
+                try:
+                    curr = self.get_current_metrics(1)
+                    self.push_history_point(curr, 1)
+                except Exception:
+                    pass
 
     def push_history_point(self, metrics: dict, replicas: int):
         with self.lock:
