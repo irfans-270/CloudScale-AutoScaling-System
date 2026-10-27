@@ -11,7 +11,7 @@ import {
   Cpu
 } from 'lucide-react';
 
-export default function Sidebar({ activeTab, setActiveTab, replicaCount, isHealthy = true }) {
+export default function Sidebar({ activeTab, setActiveTab, replicaCount, isHealthy = true, mode = 'simulation' }) {
   const menuItems = [
     { id: 'overview', label: 'Overview Dashboard', icon: LayoutDashboard },
     { id: 'replicas', label: 'Replica Pool & Pods', icon: Server, badge: `${replicaCount} Active` },
@@ -91,11 +91,13 @@ export default function Sidebar({ activeTab, setActiveTab, replicaCount, isHealt
           </div>
           <div className="flex justify-between">
             <span>Autoscaler:</span>
-            <span className="text-cyan-400">Active (1s loop)</span>
+            <span className="text-cyan-400">{mode === 'aws' ? 'AWS ASG (Live)' : 'Active (1s loop)'}</span>
           </div>
           <div className="flex justify-between">
             <span>Cluster Mode:</span>
-            <span className="text-amber-400">Local Sim</span>
+            <span className={mode === 'aws' ? 'text-emerald-400 font-bold' : 'text-amber-400'}>
+              {mode === 'aws' ? 'AWS Live · ap-south-1' : 'Local Sim'}
+            </span>
           </div>
         </div>
       </div>

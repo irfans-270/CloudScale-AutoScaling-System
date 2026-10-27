@@ -44,7 +44,8 @@ export default function App() {
     scaling_status: "Stable",
     in_cooldown: false,
     cooldown_remaining: 0,
-    is_simulated: true
+    is_simulated: true,
+    mode: 'simulation'
   });
   const [scalingConfig, setScalingConfig] = useState({
     min_replicas: 1,
@@ -171,6 +172,7 @@ export default function App() {
         setActiveTab={setActiveTab} 
         replicaCount={scalingStatus.current_replicas}
         isHealthy={backendOnline}
+        mode={scalingStatus.mode}
       />
 
       {/* Main Content Area */}
@@ -199,7 +201,7 @@ export default function App() {
           )}
 
           {/* Simulation Notice Banner */}
-          <SimulationNotice isSimulated={scalingStatus.is_simulated} />
+          <SimulationNotice isSimulated={scalingStatus.is_simulated} mode={scalingStatus.mode} />
 
           {/* TAB 1: OVERVIEW */}
           {activeTab === 'overview' && (

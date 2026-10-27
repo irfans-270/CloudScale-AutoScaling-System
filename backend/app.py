@@ -1,5 +1,9 @@
 import os
 import sys
+
+# Ensure backend directory is in sys.path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import socket
 import time
 import math
@@ -12,21 +16,33 @@ from metrics_collector import MetricsCollector
 from instance_manager import InstanceManager
 from scaling_controller import ScalingController
 from load_generator import LoadGenerator
+from aws_provider import AWSProvider, AWSLoadGenerator
 
 # Environment Configuration
 CLOUDSCALE_MODE = os.environ.get("CLOUDSCALE_MODE", "simulation").strip().lower()
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "5000"))
 IS_WORKER = (CLOUDSCALE_MODE == "worker")
+IS_AWS = (CLOUDSCALE_MODE == "aws")
 
 app = Flask(__name__)
 CORS(app)
 
-# Core subsystems
-metrics_collector = MetricsCollector(history_maxlen=60, is_worker=IS_WORKER)
-instance_manager = InstanceManager(is_simulated=(not IS_WORKER))
-scaling_controller = ScalingController(instance_manager, metrics_collector, mode=CLOUDSCALE_MODE)
-load_generator = LoadGenerator(metrics_collector, instance_manager)
+# Core subsystems initialized according to operational mode
+if IS_AWS:
+    aws_provider = AWSProvider()
+    aws_load_generator = AWSLoadGenerator(alb_url=aws_provider.alb_url)
+    metrics_collector = None
+    instance_manager = None
+    scaling_controller = None
+    load_generator = None
+else:
+    metrics_collector = MetricsCollector(history_maxlen=60, is_worker=IS_WORKER)
+    instance_manager = InstanceManager(is_simulated=(not IS_WORKER))
+    scaling_controller = ScalingController(instance_manager, metrics_collector, mode=CLOUDSCALE_MODE)
+    load_generator = LoadGenerator(metrics_collector, instance_manager)
+    aws_provider = None
+    aws_load_generator = None
 
 START_TIME = time.time()
 
@@ -84,10 +100,6 @@ def get_instance_identity():
 if IS_WORKER:
     get_instance_identity()
 
-# NOTE: Under multiple Gunicorn worker processes, in-memory per-worker request
-# counters and sliding-window metrics are partial (each worker only observes
-# its own subset of requests). On AWS, ALB and CloudWatch metrics are authoritative.
-
 # Request timing hook
 @app.before_request
 def before_request():
@@ -95,21 +107,30 @@ def before_request():
 
 @app.after_request
 def after_request(response):
-    if hasattr(request, "_start_time") and request.path not in ["/api/metrics", "/api/history", "/metrics"]:
+    if not IS_AWS and hasattr(request, "_start_time") and request.path not in ["/api/metrics", "/api/history", "/metrics"]:
         duration_ms = (time.time() - request._start_time) * 1000.0
         success = response.status_code < 400
-        metrics_collector.record_request(duration_ms, success)
-        instance_manager.record_request_dispatched()
+        if metrics_collector:
+            metrics_collector.record_request(duration_ms, success)
+        if instance_manager:
+            instance_manager.record_request_dispatched()
     return response
 
 # 1. Root status
 @app.route("/", methods=["GET"])
 def index():
+    if IS_AWS:
+        mode_desc = f"AWS Live · {aws_provider.region}"
+    elif IS_WORKER:
+        mode_desc = "AWS EC2 Worker Mode"
+    else:
+        mode_desc = "Local Simulation Mode (Kubernetes compatible)"
+
     return jsonify({
         "project": "CloudScale — Intelligent Cloud Resource Auto-Scaling and Monitoring System",
         "status": "Operational",
         "version": "1.0.0",
-        "mode": "AWS EC2 Worker Mode" if IS_WORKER else "Local Simulation Mode (Kubernetes compatible)",
+        "mode": mode_desc,
         "uptime_seconds": int(time.time() - START_TIME),
         "endpoints": [
             "/health",
@@ -135,7 +156,12 @@ def health():
             "timestamp": int(time.time()),
             "uptime_seconds": int(time.time() - START_TIME)
         }
-        if IS_WORKER:
+        if IS_AWS:
+            status = aws_provider.get_scaling_status()
+            resp["mode"] = "aws"
+            resp["region"] = aws_provider.region
+            resp["replicas_active"] = status.get("current_replicas", 1)
+        elif IS_WORKER:
             identity = get_instance_identity()
             resp["instance_id"] = identity["instance_id"]
             resp["availability_zone"] = identity["availability_zone"]
@@ -148,6 +174,23 @@ def health():
 # 3. Current metrics
 @app.route("/api/metrics", methods=["GET"])
 def get_metrics():
+    if IS_AWS:
+        current_metrics = aws_provider.get_metrics()
+        scaling_status = aws_provider.get_scaling_status()
+        load_status = aws_load_generator.get_status()
+        resp_data = {
+            "metrics": current_metrics,
+            "scaling": scaling_status,
+            "load_test": load_status,
+            "timestamp": int(time.time()),
+            "mode": "aws",
+            "is_simulated": False
+        }
+        err = aws_provider.get_last_error()
+        if err:
+            resp_data["error"] = err
+        return jsonify(resp_data)
+
     current_metrics = metrics_collector.get_current_metrics(scaling_controller.current_replicas)
     scaling_status = scaling_controller.get_status()
     load_status = load_generator.get_status()
@@ -162,6 +205,19 @@ def get_metrics():
 # 4. Instances / Replicas
 @app.route("/api/instances", methods=["GET"])
 def get_instances():
+    if IS_AWS:
+        instances = aws_provider.get_instances()
+        resp_data = {
+            "instances": instances,
+            "count": len(instances),
+            "mode": "aws",
+            "is_simulated": False
+        }
+        err = aws_provider.get_last_error()
+        if err:
+            resp_data["error"] = err
+        return jsonify(resp_data)
+
     current_metrics = metrics_collector.get_current_metrics(scaling_controller.current_replicas)
     instances = instance_manager.get_instances(current_metrics["cpu_utilization"])
     return jsonify({
@@ -174,13 +230,32 @@ def get_instances():
 # 5. Scaling Status
 @app.route("/api/scaling/status", methods=["GET"])
 def get_scaling_status():
+    if IS_AWS:
+        status = aws_provider.get_scaling_status()
+        err = aws_provider.get_last_error()
+        if err:
+            status["error"] = err
+        return jsonify(status)
     return jsonify(scaling_controller.get_status())
 
 # 6. Scaling Configuration
 @app.route("/api/scaling/config", methods=["GET", "POST"])
 def scaling_config():
+    if IS_AWS:
+        if request.method == "POST":
+            # GET only in aws mode as requested
+            return jsonify({
+                "message": "Scaling policy is managed directly by AWS Auto Scaling in aws mode (GET only)",
+                "config": aws_provider.get_scaling_config()
+            }), 200
+        cfg = aws_provider.get_scaling_config()
+        err = aws_provider.get_last_error()
+        if err:
+            cfg["error"] = err
+        return jsonify(cfg)
+
     if request.method == "POST":
-        data = request.get_json() or {}
+        data = request.get_json(silent=True) or {}
         new_config = scaling_controller.update_config(
             min_replicas=data.get("min_replicas"),
             max_replicas=data.get("max_replicas"),
@@ -197,6 +272,19 @@ def scaling_config():
 # 7. Historical monitoring data for charts
 @app.route("/api/history", methods=["GET"])
 def get_history():
+    if IS_AWS:
+        history_pts = aws_provider.get_history()
+        resp_data = {
+            "history": history_pts,
+            "count": len(history_pts),
+            "mode": "aws",
+            "is_simulated": False
+        }
+        err = aws_provider.get_last_error()
+        if err:
+            resp_data["error"] = err
+        return jsonify(resp_data)
+
     return jsonify({
         "history": metrics_collector.get_history(),
         "count": len(metrics_collector.history)
@@ -205,22 +293,44 @@ def get_history():
 # 8. Scaling event log
 @app.route("/api/events", methods=["GET"])
 def get_events():
+    if IS_AWS:
+        events = aws_provider.get_events()
+        resp_data = {
+            "events": events,
+            "mode": "aws",
+            "is_simulated": False
+        }
+        err = aws_provider.get_last_error()
+        if err:
+            resp_data["error"] = err
+        return jsonify(resp_data)
+
     return jsonify({
         "events": scaling_controller.get_events()
     })
 
 @app.route("/api/events/clear", methods=["POST"])
 def clear_events():
+    if IS_AWS:
+        aws_provider.clear_events()
+        return jsonify({"message": "Scaling event history cleared"})
     scaling_controller.clear_events()
     return jsonify({"message": "Scaling event history cleared"})
 
 # 9. Load testing controls
 @app.route("/api/load/start", methods=["POST"])
 def start_load():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     concurrency = data.get("concurrency", 20)
     duration = data.get("duration", 45)
     intensity = data.get("intensity", "high")
+
+    if IS_AWS:
+        status = aws_load_generator.start(concurrency=concurrency, duration_seconds=duration, intensity=intensity)
+        return jsonify({
+            "message": "Load test workload started (real ALB target)",
+            "status": status
+        })
 
     status = load_generator.start(concurrency=concurrency, duration_seconds=duration, intensity=intensity)
     return jsonify({
@@ -230,6 +340,13 @@ def start_load():
 
 @app.route("/api/load/stop", methods=["POST"])
 def stop_load():
+    if IS_AWS:
+        status = aws_load_generator.stop()
+        return jsonify({
+            "message": "Load test workload terminated",
+            "status": status
+        })
+
     status = load_generator.stop()
     return jsonify({
         "message": "Load test workload terminated",
@@ -267,6 +384,9 @@ def compute():
         identity = get_instance_identity()
         resp_data["instance_id"] = identity["instance_id"]
         resp_data["availability_zone"] = identity["availability_zone"]
+    elif IS_AWS:
+        resp_data["mode"] = "aws"
+        resp_data["target"] = aws_provider.alb_url
     else:
         resp_data["active_replicas"] = scaling_controller.current_replicas
 
@@ -275,8 +395,12 @@ def compute():
 # 11. Prometheus metrics format
 @app.route("/metrics", methods=["GET"])
 def prometheus_metrics():
-    curr = metrics_collector.get_current_metrics(scaling_controller.current_replicas)
-    status = scaling_controller.get_status()
+    if IS_AWS:
+        curr = aws_provider.get_metrics()
+        status = aws_provider.get_scaling_status()
+    else:
+        curr = metrics_collector.get_current_metrics(scaling_controller.current_replicas)
+        status = scaling_controller.get_status()
 
     lines = [
         "# HELP cloudscale_cpu_utilization_percent Current CPU utilization percentage",
@@ -302,5 +426,5 @@ def prometheus_metrics():
     return Response("\n".join(lines) + "\n", mimetype="text/plain; version=0.0.4")
 
 if __name__ == "__main__":
-    print(f"[CloudScale Backend] Starting server on http://{HOST}:{PORT} ...")
+    print(f"[CloudScale Backend] Starting server in mode '{CLOUDSCALE_MODE}' on http://{HOST}:{PORT} ...")
     app.run(host=HOST, port=PORT, debug=False, threaded=True)

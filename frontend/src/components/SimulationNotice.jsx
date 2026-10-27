@@ -1,7 +1,31 @@
 import React from 'react';
-import { Info, Terminal, Box } from 'lucide-react';
+import { Info, Cloud } from 'lucide-react';
 
-export default function SimulationNotice({ isSimulated = true }) {
+export default function SimulationNotice({ isSimulated = true, mode = 'simulation' }) {
+  if (mode === 'aws') {
+    return (
+      <div className="bg-emerald-950/40 border border-emerald-500/30 rounded-xl p-4 my-4 flex items-start gap-3.5 backdrop-blur-sm">
+        <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shrink-0">
+          <Cloud className="w-5 h-5" />
+        </div>
+        <div className="text-xs space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-white tracking-wide">
+              AWS Live · ap-south-1
+            </span>
+            <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+              Live Cloud Data
+            </span>
+          </div>
+          <p className="text-slate-300 leading-relaxed">
+            Connected to AWS Auto Scaling Group, EC2 instances, and Application Load Balancer.
+            <span className="text-amber-300 ml-1.5 font-medium">CloudWatch data lags about 1-2 min.</span>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (!isSimulated) return null;
 
   return (
